@@ -12,6 +12,25 @@ from openpyxl.utils import get_column_letter
 # CONFIGURAÇÃO DE DESIGN DA PLATAFORMA (Padrão Natura & Co com emoji 💵)
 # =========================================================================
 st.set_page_config(page_title="Share Picking - Natura", page_icon="💵", layout="wide")
+# --- 1.1 FONTE POPPINS CUSTOMIZADA ---
+st.markdown(
+    """
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap');
+
+    /* Aplica a fonte globalmente no app inteiro */
+    html, body, [data-testid="stAppViewContainer"], .stApp {
+        font-family: 'Poppins', sans-serif !important;
+    }
+    
+    /* Força títulos, botões e textos a usarem Poppins */
+    h1, h2, h3, h4, h5, h6, p, label, span, button, .stButton>button {
+        font-family: 'Poppins', sans-serif !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 st.title("💵 Agente de Sourcing: Share Picking")
 st.write("Suba as planilhas oficiais, CSVs ou propostas em PDF dos fornecedores para gerar a consolidação automática.")
