@@ -211,9 +211,9 @@ if arquivos_carregados:
         if st.button("🚀 Gerar Cherry Picking Mestre"):
             with st.spinner("🧠 IA unificando as planilhas e aplicando o padrão Natura..."):
                 
-                # Configuração segura com o modelo estável gemini-1.5-pro
+                # Configuração segura com o modelo padrão gemini-2.5-flash
                 config_segura_json = {"temperature": 0.1, "response_mime_type": "application/json"}
-                model = genai.GenerativeModel(model_name="gemini-1.5-pro")
+                model = genai.GenerativeModel(model_name="gemini-2.5-flash")
                 
                 fornecedores_str = ", ".join([f'"{f}"' for f in fornecedores_detectados])
                 
@@ -243,7 +243,6 @@ if arquivos_carregados:
                     dados_json = json.loads(texto_json)
                     df_consolidado = pd.DataFrame(dados_json)
                     
-                    # Organiza por Região e Turnos para garantir o layout em blocos
                     if "Região" in df_consolidado.columns:
                         df_consolidado = df_consolidado.sort_values(by=["Região", "Turnos"]).reset_index(drop=True)
                     
