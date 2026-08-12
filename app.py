@@ -8,15 +8,15 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 # =========================================================================
+# CONFIGURAÇÃO DA PÁGINA E DESIGN POPPINS
 # =========================================================================
-st.set_page_config(page_title="Share Picking - Natura", page_icon="💵", layout="wide")
+st.set_page_config(page_title="Cherry Picking - Natura", page_icon="💵", layout="wide")
 
 st.markdown(
     """
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap');
 
-    /* Aplica na raiz do app para que todos os componentes herdem a fonte sem quebrar o layout interno */
     html, body, [data-testid="stAppViewContainer"], .stApp {
         font-family: 'Poppins', sans-serif !important;
     }
@@ -25,7 +25,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-st.title("💵 Agente de Sourcing: Share Picking")
+st.title("💵 Agente de Sourcing: Cherry Picking")
 st.write("Suba as planilhas oficiais ou CSVs dos fornecedores para gerar a consolidação automática.")
 
 # =========================================================================
@@ -76,7 +76,7 @@ def limpar_valor(val):
 def estilizar_planilha_excel(df, fornecedores):
     wb = openpyxl.Workbook()
     ws = wb.active
-    ws.title = "Share Picking"
+    ws.title = "Cherry Picking"
     
     colunas_completas = ["Região", "Cargo", "Turnos"] + fornecedores + ["Melhor Preço", "Fornecedor Vencedor"]
     ws.append(colunas_completas)
@@ -112,6 +112,7 @@ def estilizar_planilha_excel(df, fornecedores):
         regiao_original = row.get("Região", "")
         regiao = str(regiao_original).strip()
         
+        # Salta uma linha física no Excel ao mudar de região
         if current_region is not None and regiao != current_region:
             row_num += 1
             
@@ -188,69 +189,77 @@ if arquivos_carregados:
         st.error("❌ Chave API não configurada no secrets.toml!")
     else:
         fornecedores_detectados = []
+        contexto_planilhas = ""
+        
         for arquivo in arquivos_carregados:
             nome_fornecedor = arquivo.name.split(".")[0].replace("Cotações M.O.xlsx -", "").replace("Cotações M.O. -", "").strip()
             fornecedores_detectados.append(nome_fornecedor)
             
+            try:
+                if arquivo.name.endswith(".xlsx"):
+                    df_temp = pd.read_excel(arquivo)
+                else:
+                    df_temp = pd.read_csv(arquivo)
+                
+                contexto_planilhas += f"\n--- PROPOSTA DO FORNECEDOR: {nome_fornecedor} ---\n"
+                contexto_planilhas += df_temp.to_csv(index=False) + "\n"
+            except Exception as e:
+                st.error(f"Erro ao ler {arquivo.name}: {e}")
+            
         st.success(f"🤖 Agente: {len(arquivos_carregados)} fornecedores prontos: {', '.join(fornecedores_detectados)}")
 
-        if st.button("🚀 Gerar Share Picking Mestre"):
+        if st.button("🚀 Gerar Cherry Picking Mestre"):
             with st.spinner("🧠 IA unificando as planilhas e aplicando o padrão Natura..."):
-                dfs_fornecedores = []
-                config_segura_json = {"temperature": 0.1, "response_mime_type": "application/json"}
-                model = genai.GenerativeModel(model_name="gemini-3.1-flash-lite-preview")
                 
-                for arquivo in arquivos_carregados:
-                    nome_fornecedor = arquivo.name.split(".")[0].replace("Cotações M.O.xlsx -", "").replace("Cotações M.O. -", "").strip()
-                    try:
-                        if arquivo.name.endswith(".xlsx"):
-                            df_temp = pd.read_excel(arquivo)
-                        else:
-                            df_temp = pd.read_csv(arquivo)
-                        conteudo_texto = df_temp.to_csv(index=False)
-                    except Exception as e:
-                        st.error(f"Erro ao ler {arquivo.name}: {e}")
-                        continue
-                        
-                    prompt_excel = f"""
-                    Você é um analista especialista em suprimentos. Extraia os valores de diárias para '{nome_fornecedor}'.
-                    Conteúdo:
-                    {conteudo_texto}
-                    
-                    Retorne uma lista de objetos JSON com as chaves exatas:
-                    "Região", "Cargo", "Turnos", "{nome_fornecedor}"
-                    """
-                    resposta = model.generate_content(prompt_excel, generation_config=config_segura_json)
+                # Configuração segura com o modelo estável gemini-1.5-pro
+                config_segura_json = {"temperature": 0.1, "response_mime_type": "application/json"}
+                model = genai.GenerativeModel(model_name="gemini-1.5-pro")
+                
+                fornecedores_str = ", ".join([f'"{f}"' for f in fornecedores_detectados])
+                
+                prompt_unico = f"""
+                Você é um analista especialista em suprimentos da Natura.
+                Sua tarefa é consolidar os dados das planilhas de TODOS os fornecedores fornecidos abaixo em UMA ÚNICA TABELA CONSOLIDADA DE CHERRY PICKING.
+
+                Fornecedores a incluir como colunas de valores: {fornecedores_str}
+
+                Conteúdo das propostas:
+                {contexto_planilhas}
+
+                Regras Rígidas de Consolidação:
+                1. Alinhe exatamente as mesmas linhas cruzando: Região, Cargo e Turnos.
+                2. Padronize os nomes de "Região", "Cargo" e "Turnos" de forma idêntica para todos os fornecedores (ex: use o formato completo de turnos como "1º turno (Segunda à Sábado) - 06:00 - 14:00").
+                3. Para cada linha, crie campos específicos para os valores numéricos das diárias de CADA fornecedor listado.
+                4. O valor dos preços das diárias devem ser numéricos puramente (Ex: 229.82). Se algum fornecedor não tiver cotação para uma linha, envie null.
+
+                Retorne APENAS uma lista de objetos JSON onde cada objeto representa uma linha com as chaves:
+                "Região", "Cargo", "Turnos", {fornecedores_str}
+                """
+                
+                try:
+                    resposta = model.generate_content(prompt_unico, generation_config=config_segura_json)
                     texto_json = limpar_json_retornado(resposta.text)
                     
-                    try:
-                        dados_json = json.loads(texto_json)
-                        df_individual = pd.DataFrame(dados_json)
-                        df_individual = df_individual.drop_duplicates(subset=["Região", "Cargo", "Turnos"])
-                        dfs_fornecedores.append(df_individual)
-                    except Exception as e:
-                        st.error(f"Erro no processamento de {nome_fornecedor}: {e}")
-                        
-                if dfs_fornecedores:
-                    df_consolidado = dfs_fornecedores[0]
-                    for df_proximo in dfs_fornecedores[1:]:
-                        df_consolidado = pd.merge(df_consolidado, df_proximo, on=["Região", "Cargo", "Turnos"], how="outer")
-                        
-                    df_consolidado.columns = [str(c).strip() for c in df_consolidado.columns]
-                    fornecedores_detectados = list(set(fornecedores_detectados))
-                    df_consolidado = df_consolidado.sort_values(by=["Região", "Turnos"]).reset_index(drop=True)
+                    dados_json = json.loads(texto_json)
+                    df_consolidado = pd.DataFrame(dados_json)
+                    
+                    # Organiza por Região e Turnos para garantir o layout em blocos
+                    if "Região" in df_consolidado.columns:
+                        df_consolidado = df_consolidado.sort_values(by=["Região", "Turnos"]).reset_index(drop=True)
                     
                     buffer_excel = estilizar_planilha_excel(df_consolidado, fornecedores_detectados)
                     
                     st.balloons()
                     st.success("✨ Processo concluído com Sucesso!")
                     
-                    st.write("📊 Prévia do Ajuste:")
+                    st.write("📊 Prévia da Tabela Consolidada:")
                     st.dataframe(df_consolidado, use_container_width=True)
                     
                     st.download_button(
                         label="📥 Clique aqui para baixar a Planilha Excel (.xlsx)",
                         data=buffer_excel,
-                        file_name="Share_Picking_Consolidado_Final.xlsx",
+                        file_name="Cherry_Picking_Consolidado_Final.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
+                except Exception as e:
+                    st.error(f"Erro ao consolidar propostas: {e}")
