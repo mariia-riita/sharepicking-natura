@@ -1,8 +1,6 @@
 import streamlit as st
-import google.generativeai as genai
 import pandas as pd
 import io
-import json
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -28,44 +26,12 @@ st.markdown(
 st.title("💵 Agente de Sourcing: Cherry Picking")
 st.write("Suba as planilhas oficiais ou CSVs dos fornecedores para gerar a consolidação automática.")
 
-# =========================================================================
-# SEGURANÇA: Configuração da Chave API oculta nos segredos do Streamlit
-# =========================================================================
-try:
-    API_KEY = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=API_KEY)
-    chave_configurada = True
-except Exception:
-    chave_configurada = False
-
-def obter_modelo_disponivel():
-    """Identifica dinamicamente o nome exato do modelo ativo na sua conta para evitar erros 404."""
-    try:
-        modelos = [m.name for m in genai.list_models() if "generateContent" in m.supported_generation_methods]
-        # Dá preferência para modelos flash/pro conhecidos
-        for m in modelos:
-            if "flash" in m or "pro" in m:
-                return m
-        if modelos:
-            return modelos[0]
-    except Exception:
-        pass
-    return "models/gemini-1.5-flash"
-
 # Caixa de upload: Apenas planilhas Excel e CSV
 arquivos_carregados = st.file_uploader(
     "Arraste as cotações aqui (Formatos aceitos: Excel .xlsx ou .csv):", 
     type=["xlsx", "csv"], 
     accept_multiple_files=True
 )
-
-def limpar_json_retornado(texto):
-    texto = texto.strip()
-    if texto.startswith("```"):
-        linhas = texto.split("\n")
-        if lines := [l for l in linhas if not l.startswith("```")]:
-            texto = "\n".join(lines).strip()
-    return texto
 
 def limpar_valor(val):
     if pd.isna(val) or val is None:
@@ -82,47 +48,81 @@ def limpar_valor(val):
     except ValueError:
         return None
 
-# Mapeamento e limpeza reserva via Python (descarta colunas de taxa/imposto)
-def normalizar_colunas_backup(df, nome_fornecedor):
-    col_map = {}
-    colunas_diaria_candidatas = []
+# =========================================================================
+# PROCESSAMENTO INTELIGENTE DE MULTI-ABAS E CUSTO TOTAL
+# =========================================================================
+def processar_arquivo_cotacao(file_obj, nome_arquivo):
+    dfs_extraidos = []
     
-    for col in df.columns:
-        c_lower = str(col).strip().lower()
-        if any(k in c_lower for k in ["regi", "cd", "local"]):
-            col_map[col] = "Região"
-        elif any(k in c_lower for k in ["carg", "funç", "func"]):
-            col_map[col] = "Cargo"
-        elif any(k in c_lower for k in ["turn", "horar"]):
-            col_map[col] = "Turnos"
-        else:
-            # Descarta colunas de taxa, imposto ou percentual
-            if not any(bad in c_lower for bad in ["taxa", "imposto", "%", "percent"]):
-                if any(good in c_lower for good in ["diaria", "diária", "preço", "preco", "valor"]):
-                    colunas_diaria_candidatas.append(col)
-
-    df_renamed = df.rename(columns=col_map)
-
-    if "Região" not in df_renamed.columns:
-        df_renamed["Região"] = "Geral"
-    if "Cargo" not in df_renamed.columns:
-        df_renamed["Cargo"] = "Ajudante Picking"
-    if "Turnos" not in df_renamed.columns:
-        df_renamed["Turnos"] = "1º Turno"
-
-    # Seleciona a coluna de preço correta
-    if colunas_diaria_candidatas:
-        col_preco = colunas_diaria_candidatas[-1] # Prioriza a última coluna de preço (normalmente 'Valor da Diária')
-        df_renamed[nome_fornecedor] = df_renamed[col_preco].apply(limpar_valor)
+    if nome_arquivo.endswith(".csv"):
+        df_raw = pd.read_csv(file_obj)
+        dfs_extraidos.append((nome_arquivo, df_raw))
     else:
-        outras = [c for c in df_renamed.columns if c not in ["Região", "Cargo", "Turnos"]]
-        if outras:
-            df_renamed[nome_fornecedor] = df_renamed[outras[-1]].apply(limpar_valor)
+        xl = pd.ExcelFile(file_obj)
+        for sheet in xl.sheet_names:
+            df_preview = pd.read_excel(file_obj, sheet_name=sheet, header=None)
+            
+            # Localiza a linha exata onde estão os cabeçalhos reais (Região, Turnos, etc.)
+            header_row = 0
+            for r_idx in range(min(6, len(df_preview))):
+                vals = [str(v).strip().lower() for v in df_preview.iloc[r_idx].values if pd.notna(v)]
+                if any("regi" in v for v in vals) and any("turn" in v for v in vals):
+                    header_row = r_idx
+                    break
+                    
+            df_sheet = pd.read_excel(file_obj, sheet_name=sheet, header=header_row)
+            
+            # Rotula o fornecedor/modalidade considerando o nome da aba se houver mais de uma
+            label = nome_arquivo
+            if len(xl.sheet_names) > 1:
+                aba_limpa = sheet.replace("Planilha de Cotação", "").replace("Cotação", "").strip()
+                label = f"{nome_arquivo} ({aba_limpa})" if aba_limpa else f"{nome_arquivo} ({sheet})"
+                
+            dfs_extraidos.append((label, df_sheet))
 
-    return df_renamed[["Região", "Cargo", "Turnos", nome_fornecedor]]
+    dfs_normalizados = []
+    for label, df in dfs_extraidos:
+        col_reg, col_cargo, col_turno, col_valor = None, None, None, None
+        
+        for col in df.columns:
+            c_lower = str(col).strip().lower()
+            if any(k in c_lower for k in ["regi", "cd", "local"]):
+                col_reg = col
+            elif any(k in c_lower for k in ["carg", "funç", "func"]):
+                col_cargo = col
+            elif any(k in c_lower for k in ["turn", "horar"]):
+                col_turno = col
+
+        # Prioridade máxima para "Valor Total" para capturar o custo final com taxas/impostos
+        for col in df.columns:
+            c_lower = str(col).strip().lower()
+            if "valor total" in c_lower or "total" in c_lower:
+                col_valor = col
+                break
+                
+        if not col_valor:
+            for col in df.columns:
+                c_lower = str(col).strip().lower()
+                if any(g in c_lower for g in ["diaria", "diária", "preço", "preco", "valor"]) and not any(b in c_lower for bad in ["taxa", "imposto", "%", "pis", "iss", "ir"] for b in [bad]):
+                    col_valor = col
+                    break
+
+        if col_reg and col_turno and col_valor:
+            df_sub = pd.DataFrame()
+            df_sub["Região"] = df[col_reg].astype(str).str.strip()
+            df_sub["Cargo"] = df[col_cargo].astype(str).str.strip() if col_cargo else "Ajudante Picking"
+            df_sub["Turnos"] = df[col_turno].astype(str).str.strip()
+            df_sub[label] = df[col_valor].apply(limpar_valor)
+            
+            # Limpeza de linhas vazias e cabeçalhos residuais
+            df_sub = df_sub.dropna(subset=["Região", label])
+            df_sub = df_sub[~df_sub["Região"].str.lower().isin(["nan", "região", "region"])]
+            dfs_normalizados.append(df_sub)
+            
+    return dfs_normalizados
 
 # =========================================================================
-# FUNÇÃO DE FORMATAÇÃO DO EXCEL
+# FUNÇÃO DE FORMATAÇÃO E EXPORTAÇÃO EXCEL
 # =========================================================================
 def estilizar_planilha_excel(df, fornecedores):
     wb = openpyxl.Workbook()
@@ -136,7 +136,7 @@ def estilizar_planilha_excel(df, fornecedores):
     idx_winner_col = 5 + len(fornecedores)
     total_cols = idx_winner_col
     
-    header_fill = PatternFill(start_color="9E472A", end_color="9E472A", fill_type="solid")
+    header_fill = PatternFill(start_color="9E472A", end_color="9E472A", fill_type="solid") # Terracota Natura
     header_font = Font(name="Poppins", size=11, bold=True, color="FFFFFF")
     border_cinza = Border(
         left=Side(style='thin', color='E0D8D3'), right=Side(style='thin', color='E0D8D3'),
@@ -187,6 +187,7 @@ def estilizar_planilha_excel(df, fornecedores):
         col_let_forn_end = get_column_letter(3 + len(fornecedores))
         col_let_min = get_column_letter(idx_min_col)
         
+        # Fórmulas de Excel gravadas para execução no programa desktop
         ws.cell(row=row_num, column=idx_min_col, value=f"=MIN({col_let_forn_start}{row_num}:{col_let_forn_end}{row_num})")
         ws.cell(row=row_num, column=idx_winner_col, value=f'=_xlfn.XLOOKUP({col_let_min}{row_num}, {col_let_forn_start}{row_num}:{col_let_forn_end}{row_num}, ${col_let_forn_start}$1:${col_let_forn_end}$1)')
         
@@ -232,93 +233,63 @@ def estilizar_planilha_excel(df, fornecedores):
     return buffer
 
 # =========================================================================
-# OPERAÇÃO DA INTERFACE
+# EXECUÇÃO DA INTERFACE
 # =========================================================================
 if arquivos_carregados:
-    fornecedores_detectados = []
-    contexto_planilhas = ""
-    dfs_backup = []
+    dfs_processados = []
 
     for arquivo in arquivos_carregados:
-        nome_fornecedor = arquivo.name.split(".")[0].replace("Cotações M.O.xlsx -", "").replace("Cotações M.O. -", "").strip()
-        fornecedores_detectados.append(nome_fornecedor)
-        
+        nome_clean = arquivo.name.split(".")[0].replace("Cotações M.O.xlsx -", "").replace("Cotações M.O. -", "").strip()
         try:
-            if arquivo.name.endswith(".xlsx"):
-                df_temp = pd.read_excel(arquivo)
-            else:
-                df_temp = pd.read_csv(arquivo)
-            
-            contexto_planilhas += f"\n--- PROPOSTA DO FORNECEDOR: {nome_fornecedor} ---\n"
-            contexto_planilhas += df_temp.dropna(how="all").to_csv(index=False) + "\n"
-            
-            dfs_backup.append(normalizar_colunas_backup(df_temp, nome_fornecedor))
+            sub_dfs = processar_arquivo_cotacao(arquivo, nome_clean)
+            dfs_processados.extend(sub_dfs)
         except Exception as e:
-            st.error(f"Erro ao ler {arquivo.name}: {e}")
-        
-    st.success(f"🤖 Agente: {len(arquivos_carregados)} fornecedores prontos: {', '.join(fornecedores_detectados)}")
+            st.error(f"Erro ao ler arquivo {arquivo.name}: {e}")
 
-    if st.button("🚀 Gerar Cherry Picking Mestre"):
-        with st.spinner("🧠 Unificando planilhas e extraindo diárias oficiais..."):
-            df_consolidado = None
-            
-            if chave_configurada:
+    if dfs_processados:
+        colunas_fornecedores = [list(d.columns)[-1] for d in dfs_processados]
+        st.success(f"🤖 Agente: {len(colunas_fornecedores)} coluna(s) de cotação identificada(s): {', '.join(colunas_fornecedores)}")
+
+        if st.button("🚀 Gerar Cherry Picking Mestre"):
+            with st.spinner("⚡ Unificando planilhas e calculando os menores preços..."):
                 try:
-                    nome_modelo = obter_modelo_disponivel()
-                    config_segura_json = {"temperature": 0.1, "response_mime_type": "application/json"}
-                    model = genai.GenerativeModel(model_name=nome_modelo)
-                    
-                    fornecedores_str = ", ".join([f'"{f}"' for f in fornecedores_detectados])
-                    
-                    prompt_unico = f"""
-                    Você é um analista especialista em suprimentos da Natura.
-                    Sua tarefa é consolidar os dados das planilhas de TODOS os fornecedores fornecidos abaixo em UMA ÚNICA TABELA CONSOLIDADA DE CHERRY PICKING.
+                    df_consolidado = dfs_processados[0]
+                    for df_prox in dfs_processados[1:]:
+                        df_consolidado = pd.merge(df_consolidado, df_prox, on=["Região", "Cargo", "Turnos"], how="outer")
 
-                    Fornecedores a incluir como colunas de valores: {fornecedores_str}
-
-                    Conteúdo das propostas:
-                    {contexto_planilhas}
-
-                    Regras Rígidas de Extração de Preços:
-                    1. ATENÇÃO: Identifique o VALOR CHEIO DA DIÁRIA em R$ de cada fornecedor (Ex: 229.82, 355.36, 265.00).
-                    2. NÃO confunda o valor da diária com percentuais de Taxa (Ex: 1.6 ou 0.0975) ou Imposto (Ex: 16.5). Ignore taxas e impostos.
-                    3. Alinhe exatamente as mesmas linhas cruzando: Região, Cargo e Turnos.
-                    4. Padronize os nomes de "Região", "Cargo" e "Turnos" de forma idêntica para todos os fornecedores (ex: "Murici / AL", "1º turno (Segunda à Sábado) - 06:00 - 14:00").
-                    5. Se algum fornecedor não tiver cotação para uma linha, envie null.
-
-                    Retorne APENAS uma lista de objetos JSON onde cada objeto representa uma linha com as chaves:
-                    "Região", "Cargo", "Turnos", {fornecedores_str}
-                    """
-                    
-                    resposta = model.generate_content(prompt_unico, generation_config=config_segura_json)
-                    texto_json = limpar_json_retornado(resposta.text)
-                    
-                    dados_json = json.loads(texto_json)
-                    df_consolidado = pd.DataFrame(dados_json)
-                except Exception as e:
-                    st.warning(f"⚠️ Processando via motor local (Erro na API IA: {e})")
-
-            # Caso a API não esteja configurada ou falhe, executa o motor local tratado
-            if df_consolidado is None and dfs_backup:
-                df_consolidado = dfs_backup[0]
-                for df_prox in dfs_backup[1:]:
-                    df_consolidado = pd.merge(df_consolidado, df_prox, on=["Região", "Cargo", "Turnos"], how="outer")
-
-            if df_consolidado is not None:
-                if "Região" in df_consolidado.columns and "Turnos" in df_consolidado.columns:
                     df_consolidado = df_consolidado.sort_values(by=["Região", "Turnos"]).reset_index(drop=True)
-                
-                buffer_excel = estilizar_planilha_excel(df_consolidado, fornecedores_detectados)
-                
-                st.balloons()
-                st.success("✨ Processo concluído com Sucesso!")
-                
-                st.write("📊 Prévia da Tabela Consolidada:")
-                st.dataframe(df_consolidado, use_container_width=True)
-                
-                st.download_button(
-                    label="📥 Clique aqui para baixar a Planilha Excel (.xlsx)",
-                    data=buffer_excel,
-                    file_name="Cherry_Picking_Consolidado_Final.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+
+                    # Cálculo explícito em Python para que a prévia da tela mostre os resultados reais
+                    def calc_melhor_preco(row):
+                        vals = [limpar_valor(row[c]) for c in colunas_fornecedores if pd.notna(row[c])]
+                        vals_validos = [v for v in vals if v is not None]
+                        return min(vals_validos) if vals_validos else None
+
+                    def calc_fornecedor_vencedor(row):
+                        best = calc_melhor_preco(row)
+                        if best is None:
+                            return None
+                        for c in colunas_fornecedores:
+                            if limpar_valor(row[c]) == best:
+                                return c
+                        return None
+
+                    df_consolidado["Melhor Preço"] = df_consolidado.apply(calc_melhor_preco, axis=1)
+                    df_consolidado["Fornecedor Vencedor"] = df_consolidado.apply(calc_fornecedor_vencedor, axis=1)
+
+                    buffer_excel = estilizar_planilha_excel(df_consolidado, colunas_fornecedores)
+
+                    st.balloons()
+                    st.success("✨ Processo concluído com sucesso!")
+
+                    st.write("📊 Prévia da Tabela Consolidada:")
+                    st.dataframe(df_consolidado, use_container_width=True)
+
+                    st.download_button(
+                        label="📥 Clique aqui para baixar a Planilha Excel (.xlsx)",
+                        data=buffer_excel,
+                        file_name="Cherry_Picking_Consolidado_Final.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                except Exception as e:
+                    st.error(f"❌ Erro ao consolidar planilhas: {e}")
