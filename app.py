@@ -38,6 +38,30 @@ try:
 except Exception:
     chave_configurada = False
 
+def obter_modelo_disponivel():
+    """Detecta automaticamente qual modelo ativo está liberado para a sua chave API."""
+    modelos_preferidos = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+    ]
+    try:
+        modelos_disponiveis = [
+            m.name.replace("models/", "")
+            for m in genai.list_models()
+            if "generateContent" in m.supported_generation_methods
+        ]
+        for pref in modelos_preferidos:
+            if pref in modelos_disponiveis:
+                return pref
+        if modelos_disponiveis:
+            return modelos_disponiveis[0]
+    except Exception:
+        pass
+    return "gemini-1.5-flash"
+
 # Caixa de upload: Apenas planilhas Excel e CSV
 arquivos_carregados = st.file_uploader(
     "Arraste as cotações aqui (Formatos aceitos: Excel .xlsx ou .csv):", 
@@ -208,9 +232,11 @@ if arquivos_carregados:
         if st.button("🚀 Gerar Cherry Picking Mestre"):
             with st.spinner("🧠 IA unificando as planilhas e aplicando o padrão Natura..."):
                 try:
-                    # Modelo oficial e estável gemini-1.5-flash
+                    # Seleção dinâmica de modelo ativo para evitar erros 404
+                    nome_modelo = obter_modelo_disponivel()
+                    
                     config_segura_json = {"temperature": 0.1, "response_mime_type": "application/json"}
-                    model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+                    model = genai.GenerativeModel(model_name=nome_modelo)
                     
                     fornecedores_str = ", ".join([f'"{f}"' for f in fornecedores_detectados])
                     
@@ -245,7 +271,7 @@ if arquivos_carregados:
                     buffer_excel = estilizar_planilha_excel(df_consolidado, fornecedores_detectados)
                     
                     st.balloons()
-                    st.success("✨ Processo concluído com Sucesso!")
+                    st.success(f"✨ Processo concluído com Sucesso! (Modelo detectado: {nome_modelo})")
                     
                     st.write("📊 Prévia da Tabela Consolidada:")
                     st.dataframe(df_consolidado, use_container_width=True)
