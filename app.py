@@ -38,14 +38,13 @@ try:
 except Exception:
     chave_configurada = False
 
-# Caixa de upload limpa: APENAS planilhas Excel e CSV
+# Caixa de upload: Apenas planilhas Excel e CSV
 arquivos_carregados = st.file_uploader(
     "Arraste as cotações aqui (Formatos aceitos: Excel .xlsx ou .csv):", 
     type=["xlsx", "csv"], 
     accept_multiple_files=True
 )
 
-# Limpeza de segurança para garantir o recebimento de um JSON puro da IA
 def limpar_json_retornado(texto):
     texto = texto.strip()
     if texto.startswith("```"):
@@ -54,7 +53,6 @@ def limpar_json_retornado(texto):
             texto = "\n".join(lines).strip()
     return texto
 
-# Extração e conversão de strings de dinheiro para float puro
 def limpar_valor(val):
     if pd.isna(val) or val is None:
         return None
@@ -71,7 +69,7 @@ def limpar_valor(val):
         return None
 
 # =========================================================================
-# FUNÇÃO DE FORMATAÇÃO DO EXCEL (Design Poppins + Pulo de Linha por Região)
+# FUNÇÃO DE FORMATAÇÃO DO EXCEL
 # =========================================================================
 def estilizar_planilha_excel(df, fornecedores):
     wb = openpyxl.Workbook()
@@ -85,7 +83,7 @@ def estilizar_planilha_excel(df, fornecedores):
     idx_winner_col = 5 + len(fornecedores)
     total_cols = idx_winner_col
     
-    header_fill = PatternFill(start_color="9E472A", end_color="9E472A", fill_type="solid") # Terracota Natura
+    header_fill = PatternFill(start_color="9E472A", end_color="9E472A", fill_type="solid")
     header_font = Font(name="Poppins", size=11, bold=True, color="FFFFFF")
     border_cinza = Border(
         left=Side(style='thin', color='E0D8D3'), right=Side(style='thin', color='E0D8D3'),
@@ -112,7 +110,6 @@ def estilizar_planilha_excel(df, fornecedores):
         regiao_original = row.get("Região", "")
         regiao = str(regiao_original).strip()
         
-        # Salta uma linha física no Excel ao mudar de região
         if current_region is not None and regiao != current_region:
             row_num += 1
             
@@ -202,7 +199,7 @@ if arquivos_carregados:
                     df_temp = pd.read_csv(arquivo)
                 
                 contexto_planilhas += f"\n--- PROPOSTA DO FORNECEDOR: {nome_fornecedor} ---\n"
-                contexto_planilhas += df_temp.to_csv(index=False) + "\n"
+                contexto_planilhas += df_temp.dropna(how="all").to_csv(index=False) + "\n"
             except Exception as e:
                 st.error(f"Erro ao ler {arquivo.name}: {e}")
             
@@ -210,40 +207,39 @@ if arquivos_carregados:
 
         if st.button("🚀 Gerar Cherry Picking Mestre"):
             with st.spinner("🧠 IA unificando as planilhas e aplicando o padrão Natura..."):
-                
-                # Configuração segura com o modelo padrão gemini-2.5-flash
-                config_segura_json = {"temperature": 0.1, "response_mime_type": "application/json"}
-                model = genai.GenerativeModel(model_name="gemini-2.5-flash")
-                
-                fornecedores_str = ", ".join([f'"{f}"' for f in fornecedores_detectados])
-                
-                prompt_unico = f"""
-                Você é um analista especialista em suprimentos da Natura.
-                Sua tarefa é consolidar os dados das planilhas de TODOS os fornecedores fornecidos abaixo em UMA ÚNICA TABELA CONSOLIDADA DE CHERRY PICKING.
-
-                Fornecedores a incluir como colunas de valores: {fornecedores_str}
-
-                Conteúdo das propostas:
-                {contexto_planilhas}
-
-                Regras Rígidas de Consolidação:
-                1. Alinhe exatamente as mesmas linhas cruzando: Região, Cargo e Turnos.
-                2. Padronize os nomes de "Região", "Cargo" e "Turnos" de forma idêntica para todos os fornecedores (ex: use o formato completo de turnos como "1º turno (Segunda à Sábado) - 06:00 - 14:00").
-                3. Para cada linha, crie campos específicos para os valores numéricos das diárias de CADA fornecedor listado.
-                4. O valor dos preços das diárias devem ser numéricos puramente (Ex: 229.82). Se algum fornecedor não tiver cotação para uma linha, envie null.
-
-                Retorne APENAS uma lista de objetos JSON onde cada objeto representa uma linha com as chaves:
-                "Região", "Cargo", "Turnos", {fornecedores_str}
-                """
-                
                 try:
+                    # Modelo oficial e estável gemini-1.5-flash
+                    config_segura_json = {"temperature": 0.1, "response_mime_type": "application/json"}
+                    model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+                    
+                    fornecedores_str = ", ".join([f'"{f}"' for f in fornecedores_detectados])
+                    
+                    prompt_unico = f"""
+                    Você é um analista especialista em suprimentos da Natura.
+                    Sua tarefa é consolidar os dados das planilhas de TODOS os fornecedores fornecidos abaixo em UMA ÚNICA TABELA CONSOLIDADA DE CHERRY PICKING.
+
+                    Fornecedores a incluir como colunas de valores: {fornecedores_str}
+
+                    Conteúdo das propostas:
+                    {contexto_planilhas}
+
+                    Regras Rígidas de Consolidação:
+                    1. Alinhe exatamente as mesmas linhas cruzando: Região, Cargo e Turnos.
+                    2. Padronize os nomes de "Região", "Cargo" e "Turnos" de forma idêntica para todos os fornecedores.
+                    3. Para cada linha, crie campos específicos para os valores numéricos das diárias de CADA fornecedor listado.
+                    4. O valor dos preços das diárias devem ser numéricos puramente (Ex: 229.82). Se algum fornecedor não tiver cotação para uma linha, envie null.
+
+                    Retorne APENAS uma lista de objetos JSON onde cada objeto representa uma linha com as chaves:
+                    "Região", "Cargo", "Turnos", {fornecedores_str}
+                    """
+                    
                     resposta = model.generate_content(prompt_unico, generation_config=config_segura_json)
                     texto_json = limpar_json_retornado(resposta.text)
                     
                     dados_json = json.loads(texto_json)
                     df_consolidado = pd.DataFrame(dados_json)
                     
-                    if "Região" in df_consolidado.columns:
+                    if "Região" in df_consolidado.columns and "Turnos" in df_consolidado.columns:
                         df_consolidado = df_consolidado.sort_values(by=["Região", "Turnos"]).reset_index(drop=True)
                     
                     buffer_excel = estilizar_planilha_excel(df_consolidado, fornecedores_detectados)
@@ -261,4 +257,4 @@ if arquivos_carregados:
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                     )
                 except Exception as e:
-                    st.error(f"Erro ao consolidar propostas: {e}")
+                    st.error(f"❌ Erro na consolidação das propostas: {e}")
